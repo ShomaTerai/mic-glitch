@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>1000flow</title>
+<style>
+  html, body { margin:0; height:100%; background:#f4f3ef; overflow:hidden; }
+  #view { display:block; width:100vw; height:100vh; cursor:none; }
+  #start{
+    position:fixed; inset:0; z-index:10; display:flex; flex-direction:column; gap:18px;
+    align-items:center; justify-content:center; text-align:center;
+    background:#f4f3ef; cursor:pointer; user-select:none;
+    color:#5a5a60; font:500 13px/1.8 "SF Mono", Menlo, monospace;
+    letter-spacing:.55em; text-indent:.55em;
+  }
+  #start .sub{ color:#a7a7ab; font-size:10px; letter-spacing:.26em; text-indent:.26em; }
+  .hidden{ display:none !important; }
+  #hud{
+    position:fixed; left:16px; bottom:14px; z-index:5; pointer-events:none;
+    color:#8a8a90; font:500 10px/1.8 "SF Mono", Menlo, monospace; letter-spacing:.18em;
+    opacity:1; transition:opacity 1.5s;
+  }
+  #hud.faded{ opacity:0; }
+  #hud .bar{ display:inline-block; width:96px; height:3px; background:#dddbd4; margin-left:10px; margin-right:14px; vertical-align:middle; }
+  #hud .bar i{ display:block; height:100%; width:0%; background:#76767c; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud" class="hidden">
+  <div><span id="srcLabel">MIC</span><span class="bar"><i id="lvBar"></i></span><span id="wikiLabel">WIKI …</span></div>
+  <div><span id="themeLabel">PAPER / SMEAR</span>&nbsp;&nbsp;↑↓: MIC&nbsp;&nbsp;←→: TEMPO&nbsp;&nbsp;ENTER: NEXT&nbsp;&nbsp;F: FULLSCREEN&nbsp;&nbsp;H: HIDE</div>
+</div>
+<div id="start">
+  <div id="startMain">CLICK TO CONNECT</div>
+  <div class="sub">MIC ＋ 日本語Wikipediaの編集が川柳になる ／ 音はこのMac内で処理のみ・録音や送信はしません</div>
+</div>
+<script>
+'use strict';
+/* ===================== canvas setup ===================== */
+const view  = document.getElementById('view');
+const vctx  = view.getContext('2d');
+const scene = document.createElement('canvas');
+const sctx  = scene.getContext('2d');
+const startEl   = document.getElementById('start');
+const startMain = document.getElementById('startMain');
+const hud       = document.getElementById('hud');
+const srcLabel  = document.getElementById('srcLabel');
+const lvBar     = document.getElementById('lvBar');
+const wikiLabel = document.getElementById('wikiLabel');
+const themeLabel= document.getElementById('themeLabel');
+
+const THEMES = [
+  { name:'PAPER',  style:'smear',  dark:false, bg:[244,243,239], palette:['#ff9ec9','#ff7fb1','#7fe3df','#8ee8c2','#ffe293','#ffc9a0','#b9b4f5','#9fd2f8','#f3a0e2','#ffd6e8'] },
+  { name:'NOIR',   style:'crt',    dark:true,  bg:[10,10,16],    palette:['#ff2d8a','#19e3ff','#b4ff39','#9d4dff','#ff7a1a','#00ffb2','#ff3355','#4d7cff'] },
+  { name:'ROSE',   style:'melt',   dark:false, bg:[248,233,236], palette:['#ff5f8f','#ff8fb5','#ffb347','#ff6b6b','#e84393','#c44569','#ffa8a8','#ffd3a5'] },
+  { name:'MOSS',   style:'mosaic', dark:false, bg:[234,242,232], palette:['#69b578','#4db6ac','#a8e6cf','#dcedc1','#39a0ca','#b2d8b2','#7fcf9b','#cde7a8'] },
+  { name:'COBALT', style:'wave',   dark:true,  bg:[12,18,42],    palette:['#3da5ff','#6bf0ff','#7c5cff','#ff5fd0','#9fc5ff','#00e0c6','#4769ff','#b3e5ff'] },
+];
+let themeIx = 0, T = THEMES[0];
+let PALETTE = T.palette;
+let BG_STR  = `rgb(${T.bg[0]},${T.bg[1]},${T.bg[2]})`;
+const BG_RGBA = a => `rgba(${T.bg[0]},${T.bg[1]},${T.bg[2]},${a})`;
+const pick = arr => arr[(Math.random()*arr.length)|0];
+
+let W=0, H=0, DPR=1, dprCap=2;
+let dithers=[], ditherPats=[], ditherIx=0, ditherOx=0, ditherOy=0;
+let scanPattern=null;
+
+function makeDither(){
+  const s = Math.round(240*DPR);
+  const c = document.createElement('canvas'); c.width=c.height=s;
+  const g = c.getContext('2d');
+  const cell = Math.max(4, Math.round(7*DPR));
+  const t = Math.max(1, Math.round(DPR));
+  const L = Math.max(3, Math.round(3.4*DPR));
+  for(let y=0; y<s; y+=cell){
+    for(let x=0; x<s; x+=cell){
+      const r = Math.random();
+      if(r<0.26){
+        g.globalAlpha = (r<0.10) ? 0.5 : 0.85;
+        g.fillStyle   = (r<0.10) ? '#9a9aa0' : pick(PALETTE);
+        g.fillRect(x+(cell-L)/2, y+(cell-t)/2, L, t);
+        g.fillRect(x+(cell-t)/2, y+(cell-L)/2, t, L);
+      }
+    }
+  }
+  return c;
+}
+
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, dprCap);
+  W = Math.max(2, Math.floor(innerWidth*DPR));
+  H = Math.max(2, Math.floor(innerHeight*DPR));
+  view.width=W; view.height=H;
+  view.style.width=innerWidth+'px'; view.style.height=innerHeight+'px';
+  scene.width=W; scene.height=H;
+  sctx.fillStyle=BG_STR; sctx.fillRect(0,0,W,H);
+  dithers = [makeDither(), makeDither()];
+  ditherPats = dithers.map(c => vctx.createPattern(c,'repeat'));
+  const pc = document.createElement('canvas');
+  pc.width = 4; pc.height = Math.max(3, Math.round(3*DPR));
+  const pg = pc.getContext('2d');
+  pg.fillStyle='rgba(0,0,0,0.55)'; pg.fillRect(0, pc.height-Math.max(1,Math.round(DPR)), 4, Math.max(1,Math.round(DPR)));
+  scanPattern = vctx.createPattern(pc,'repeat');
+}
+addEventListener('resize', resize);
+resize();
+
+/* ===================== audio ===================== */
+const qs = new URLSearchParams(location.search);
+let demo = qs.has('demo');
+let started=false, starting=false;
+let audioCtx=null, analyser=null, tdata=null, fdata=null;
+let level=0, smooth=0, bass=0, treble=0, peakRef=0.03;
+let glitchE=0, flash=0, flashColor='#fff', lastKick=-9999, tears=0, invertN=0;
+let gain  = parseFloat(localStorage.getItem('micGlitchGain')||'1') || 1;
+let tempo = parseFloat(localStorage.getItem('micGlitchTempo')||'1') || 1;
+let demoPhase=0, demoSpike=0, demoNextSpike=0;
+
+const avg = (a,i0,i1)=>{ let s=0,n=0; for(let i=Math.max(0,i0); i<Math.min(i1,a.length); i++){ s+=a[i]; n++; } return n? s/n : 0; };
+
+async function initMic(){
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+  });
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  await audioCtx.resume();
+  const src = audioCtx.createMediaStreamSource(stream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.55;
+  src.connect(analyser);
+  tdata = new Float32Array(analyser.fftSize);
+  fdata = new Uint8Array(analyser.frequencyBinCount);
+}
+
+function readAudio(t, dt){
+  if(demo){
+    demoPhase += dt;
+    const base = 0.20 + 0.13*Math.sin(demoPhase*0.55) + 0.09*Math.sin(demoPhase*1.9+1.2);
+    if(t >= demoNextSpike){
+      demoSpike = 0.5 + Math.random()*0.5;
+      demoNextSpike = t + 350 + Math.random()*2400;
+      kick(t, 0.6 + Math.random()*0.4);
+    }
+    demoSpike *= Math.exp(-dt*5);
+    level  = Math.max(0, Math.min(1, base + demoSpike));
+    bass   = Math.min(1, level*0.9);
+    treble = Math.min(1, level*0.55 + Math.random()*0.1);
+  } else {
+    analyser.getFloatTimeDomainData(tdata);
+    let s=0; for(let i=0;i<tdata.length;i++) s += tdata[i]*tdata[i];
+    const rms = Math.sqrt(s/tdata.length);
+    peakRef = Math.max(rms, peakRef*Math.exp(-dt*0.05), 0.03);
+    level = Math.min(1, Math.pow(rms/peakRef, 0.75) * gain);
+    analyser.getByteFrequencyData(fdata);
+    const hz = audioCtx.sampleRate/analyser.fftSize;
+    bass   = avg(fdata, 1, Math.round(200/hz))/255;
+    treble = avg(fdata, Math.round(2000/hz), Math.round(9000/hz))/255;
+    if(level - smooth > 0.26 && t - lastKick > 170) kick(t, level);
+  }
+  const k = level>smooth ? Math.min(1, dt*16) : Math.min(1, dt*3.2);
+  smooth += (level-smooth)*k;
+  glitchE *= Math.exp(-dt*2.4);
+  flash   *= Math.exp(-dt*5);
+}
+
+function kick(t, lv){
+  lastKick = t;
+  glitchE = Math.min(2.0, glitchE + 0.7 + lv*0.8);
+  tears  += 2 + ((Math.random()*3)|0);
+  flash   = Math.min(1, 0.7 + lv*0.5);
+  if(lv>0.55 && Math.random()<0.3) invertN = 1 + ((Math.random()*2)|0);
+  flashColor = pick(PALETTE);
+  ditherIx = (ditherIx+1)%dithers.length;
+  ditherOx = Math.random()*997; ditherOy = Math.random()*997;
+  spawnStreaks(2 + ((Math.random()*3)|0), lv);
+  // 強い音は句の進行にも介入する
+  if(phase==='hold' && Math.random()<0.3){ phase='dissolve'; phaseAt = t + 600; }
+  else if(phase==='gap' && Math.random()<0.4) phaseAt = Math.min(phaseAt, t + 120);
+}
+
+/* ===================== 言葉のパイプライン（日本語Wikipediaのみ） ===================== */
+let es=null, wikiOk=false, lastEvent=0;
+let five=[], fiveYa=[], seven=[];          // 5音 / 4音+「や」 / 7音
+const seenTitles = new Set();
+let lookupQueue = [];
+
+const SMALL_KANA = 'ゃゅょぁぃぅぇぉゎャュョァィゥェォヮ';
+function countMora(kana){
+  let n=0;
+  for(const ch of kana){
+    if(SMALL_KANA.includes(ch)) continue;
+    if(/[ぁ-ゖァ-ヶー〜]/.test(ch)) n++;
+  }
+  return n;
+}
+function pureKana(s){
+  const t = s.replace(/[・\s　]/g,'');
+  return /^[ぁ-ゖァ-ヶー〜]+$/.test(t) ? t : null;
+}
+function bucketize(title, kana){
+  const n = countMora(kana);
+  if(n===5)      push5(five,  { text:title });
+  else if(n===7) push5(seven, { text:title });
+  else if(n===4) push5(fiveYa,{ text:title+'や' });   // 切れ字で5音に
+}
+function push5(arr, e){
+  arr.push(e);
+  if(arr.length>60) arr.shift();
+}
+function intake(titleRaw){
+  const title = (titleRaw||'').trim();
+  if(!title || title.includes(':') || title.length<2 || title.length>20) return;
+  if(seenTitles.has(title)) return;
+  if(seenTitles.size>1500) seenTitles.clear();
+  seenTitles.add(title);
+  const kana = pureKana(title);
+  if(kana){ bucketize(title, kana); return; }
+  if(/[一-鿏々]/.test(title)){          // 漢字入り → 読みを記事冒頭から取りに行く
+    lookupQueue.push(title);
+    if(lookupQueue.length>40) lookupQueue.shift();
+  }
+}
+// 読み解決: 記事冒頭の「題名（よみがな）」括弧を拾う。取れなければ捨てる
+async function resolveOne(){
+  if(!lookupQueue.length) return;
+  const title = lookupQueue.pop();
+  try{
+    const r = await fetch('https://ja.wikipedia.org/api/rest_v1/page/summary/'+encodeURIComponent(title));
+    if(!r.ok) return;
+    const j = await r.json();
+    const ex = (j.extract||'').slice(0,90);
+    // 読み括弧はタイトル直後（冒頭28字以内に開く括弧）のみ採用。本文後方の括弧は読みではない
+    const m = ex.match(/^[^（()]{1,28}[（(]\s*([ぁ-ゖァ-ヶー〜・\s　]+?)\s*[、,）)]/);
+    if(!m) return;
+    const kana = m[1].replace(/[・\s　]/g,'');
+    if(!/^[ぁ-ゖァ-ヶー〜]+$/.test(kana)) return;
+    bucketize(title, kana);
+  }catch(e){}
+}
+setInterval(resolveOne, 1700);
+
+function initWiki(){
+  // 起動時シード: 直近の編集100件（bot除外・標準記事のみ）
+  fetch('https://ja.wikipedia.org/w/api.php?action=query&list=recentchanges&rcnamespace=0&rclimit=100&rcshow=!bot&rctype=edit%7Cnew&format=json&origin=*')
+    .then(r=>r.json())
+    .then(j=>{ (j.query && j.query.recentchanges || []).forEach(rc=>intake(rc.title)); wikiOk=true; lastEvent=performance.now(); })
+    .catch(()=>{});
+  // ライブストリーム
+  try{ es = new EventSource('https://stream.wikimedia.org/v2/stream/recentchange'); }
+  catch(e){ return; }
+  es.onmessage = m=>{
+    let d; try{ d = JSON.parse(m.data); }catch(e){ return; }
+    if(!d || d.server_name!=='ja.wikipedia.org') return;
+    if(d.type!=='edit' && d.type!=='new') return;
+    if(d.bot || d.namespace!==0 || !d.title) return;
+    intake(d.title);
+    wikiOk = true; lastEvent = performance.now();
+  };
+  es.onerror = ()=>{ wikiOk = false; };
+}
+initWiki();
+
+// 完全オフライン用の内蔵語彙（モーラ数は検証済み）
+const FB5 = ['観覧車','冷蔵庫','マンホール','すべりだい','扇風機','非常口','蜃気楼','衣替え','かたつむり','ランドセル','シャボン玉','路線バス','コンビニや','たんぽぽや'];
+const FB7 = ['非常階段','自由研究','五十音順','回送電車','折りたたみ傘','自転車置き場','観測気球','留守番電話'];
+
+/* ===================== 川柳の組み立てと進行 ===================== */
+let poem = null;              // { lines: [{text}, {text}, {text}] }
+let lineA = [0,0,0];
+let visibleLines = 0;
+let phase = 'gap', phaseAt = 1200;
+let usedFallback = new Set();
+
+function takeFrom(arr){
+  if(!arr.length) return null;
+  const span = Math.min(arr.length, 20);                      // 新しい方から20件の中で揺らぐ
+  const idx = arr.length - 1 - ((Math.random()*span)|0);
+  return arr.splice(idx,1)[0];
+}
+function fb(list){
+  let w = pick(list);
+  if(usedFallback.has(w) && Math.random()<0.8) w = pick(list);
+  usedFallback.add(w); if(usedFallback.size>10) usedFallback.clear();
+  return { text:w };
+}
+function composePoem(){
+  const L1 = (Math.random()<0.30 ? takeFrom(fiveYa) : null) || takeFrom(five) || takeFrom(fiveYa) || fb(FB5);
+  const L2 = takeFrom(seven) || fb(FB7);
+  const L3 = takeFrom(five) || takeFrom(fiveYa) || fb(FB5);
+  poem = { lines:[L1, L2, L3] };
+}
+function schedule(t, ms){ phaseAt = t + (ms*(0.8+Math.random()*0.5))/tempo; }
+
+function updatePoem(t, dt){
+  if(t >= phaseAt){
+    if(phase==='gap'){
+      composePoem(); visibleLines=1; phase='reveal'; schedule(t, 1700);
+    } else if(phase==='reveal'){
+      if(visibleLines<3){ visibleLines++; schedule(t, 1700); }
+      else { phase='hold'; schedule(t, 7500); }
+    } else if(phase==='hold'){
+      phase='dissolve'; schedule(t, 2400);
+    } else {  // dissolve
+      phase='gap'; poem=null; visibleLines=0; schedule(t, 4200);
+    }
+  }
+  for(let i=0;i<3;i++){
+    const on = poem && i<visibleLines && phase!=='dissolve';
+    lineA[i] += ((on?1:0)-lineA[i]) * Math.min(1, dt*(on?5:1.3));
+  }
+}
+
+/* ===================== 縦書き描画 ===================== */
+const FONT_M = '"Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif';
+const ROTATE_CH = 'ー〜―…';
+const GLITCH_KANA = '█▓▒ノシメ※彡';
+
+function drawPoem(t, glitch){
+  if(!poem) return;
+  const texts = poem.lines.map(l=>l.text);
+  const maxLen = Math.max(...texts.map(s=>[...s].length));
+  const cs   = Math.min(H*0.105, (H*0.70)/Math.max(5,maxLen));   // 1字の大きさ
+  const step = cs*1.12;
+  const colGap = cs*1.95;
+  // 静寂=句がくっきり立ち上がる / 音=にじんで崩れる（旧作とは逆）
+  const baseA = Math.min(phase==='hold' ? 0.14 : 0.10, (phase==='hold'?0.05:0.034) + smooth*0.04 + glitchE*0.012);
+  const blur  = (0.8 + smooth*4.0 + glitch*1.2)*DPR;
+  const off   = (0.8 + glitch*13)*DPR;
+
+  sctx.save();
+  sctx.textAlign='center'; sctx.textBaseline='middle';
+  sctx.globalCompositeOperation = T.dark ? 'lighter' : 'multiply';
+
+  for(let li=0; li<3; li++){
+    if(lineA[li]<0.02) continue;
+    const chars = [...texts[li]];
+    const x = W/2 + (1-li)*colGap;                                   // 右=上の句
+    const y0 = H/2 - (chars.length-1)*step/2 + (li-1)*cs*0.55;       // 段違い
+    const a  = baseA*lineA[li];
+    const jx = (Math.random()-0.5)*glitch*26*DPR;
+    const jy = (Math.random()-0.5)*glitch*18*DPR;
+    const passes = T.dark
+      ? [[`rgba(255,45,138,${a*0.7})`,-off, off*0.3, blur],[`rgba(25,227,255,${a*0.7})`, off,-off*0.2, blur],[`rgba(240,244,255,${a})`,0,0,blur*0.55]]
+      : [[`rgba(255,70,160,${a*0.6})`,-off, off*0.3, blur],[`rgba(0,190,200,${a*0.6})`,  off,-off*0.2, blur],[`rgba(52,52,68,${a})`,  0,0,blur*0.55]];
+    sctx.font = `600 ${cs}px ${FONT_M}`;
+    for(const [col, ox, oy, bl] of passes){
+      sctx.filter = `blur(${bl}px)`;
+      sctx.fillStyle = col;
+      for(let k=0;k<chars.length;k++){
+        let ch = chars[k];
+        if(Math.random() < glitch*0.02) ch = GLITCH_KANA[(Math.random()*GLITCH_KANA.length)|0];
+        const cx = x+jx+ox, cy = y0+k*step+jy+oy;
+        if(ROTATE_CH.includes(ch)){           // 長音などは縦書き用に90度回す
+          sctx.save(); sctx.translate(cx,cy); sctx.rotate(Math.PI/2);
+          sctx.fillText(ch, 0, 0); sctx.restore();
+        } else {
+          sctx.fillText(ch, cx, cy);
+        }
+      }
+    }
+  }
+  sctx.restore();
+}
+
+/* ===================== paint layer ===================== */
+function spawnStreaks(n, strength){
+  for(let i=0;i<n;i++){
+    const fullRow = Math.random()<0.35;
+    const w = fullRow ? W*(0.5+Math.random()*0.7) : (90 + Math.random()*420)*(0.6+strength)*DPR;
+    const h = fullRow ? (10+Math.random()*70)*DPR : (14 + Math.random()*130)*DPR;
+    const x = Math.random()*W, y = Math.random()*H;
+    const r = Math.max(w,h)/2;
+    const g = sctx.createRadialGradient(x,y,0, x,y,r);
+    const col = pick(PALETTE);
+    g.addColorStop(0, col);
+    g.addColorStop(1, col+'00');
+    sctx.save();
+    sctx.translate(x,y); sctx.scale(w/Math.max(w,h), h/Math.max(w,h)); sctx.translate(-x,-y);
+    sctx.globalAlpha = 0.30 + Math.random()*0.38 + strength*0.15;
+    sctx.globalCompositeOperation = T.dark ? 'lighter' : 'source-over';
+    sctx.fillStyle = g;
+    sctx.beginPath(); sctx.arc(x,y,r,0,7); sctx.fill();
+    sctx.restore();
+  }
+}
+
+/* ===================== style別グリッチ（scene蓄積側） ===================== */
+let crtY = 0;
+
+function styleScene(t, dt, glitch){
+  const st = T.style;
+  if(st==='smear'){
+    const s = (0.4 + glitch*4.2)*DPR;
+    sctx.save(); sctx.globalAlpha=0.93;
+    sctx.drawImage(scene, -s, 0, W+2*s, H);
+    sctx.restore();
+    pullsH((glitch*13)|0, glitch);
+    bandShifts((glitch*10)|0, glitch, 240, 46);
+  } else if(st==='crt'){
+    pullsH((glitch*4)|0, glitch);
+    for(let i=0, n=(glitch*22)|0; i<n; i++){
+      const bh = (1+Math.random()*7)*DPR;
+      const by = Math.random()*(H-bh);
+      const ox = (Math.random()-0.5)*glitch*320*DPR;
+      sctx.drawImage(scene, 0,by,W,bh, ox,by,W,bh);
+    }
+    crtY = (crtY + dt*(140+bass*520)*DPR) % (H+240);
+    const yy = crtY-120;
+    const g = sctx.createLinearGradient(0,yy-70*DPR,0,yy+70*DPR);
+    g.addColorStop(0,'rgba(255,255,255,0)');
+    g.addColorStop(.5,`rgba(255,255,255,${0.04+bass*0.09})`);
+    g.addColorStop(1,'rgba(255,255,255,0)');
+    sctx.save(); sctx.globalCompositeOperation='lighter';
+    sctx.fillStyle=g; sctx.fillRect(0,yy-70*DPR,W,140*DPR);
+    sctx.restore();
+  } else if(st==='melt'){
+    const s = (0.3 + glitch*3.0)*DPR;
+    sctx.save(); sctx.globalAlpha=0.93;
+    sctx.drawImage(scene, 0, s);
+    sctx.restore();
+    for(let i=0, n=(glitch*10)|0; i<n; i++){
+      const sw = (20+Math.random()*200)*DPR;
+      const sx = Math.random()*(W-sw);
+      const th = Math.max(2,(1+Math.random()*4)*DPR);
+      const sy = Math.random()*(H-th);
+      const run = (60+Math.random()*420)*DPR*(0.4+Math.min(1,glitch));
+      sctx.drawImage(scene, sx,sy,sw,th, sx,sy,sw,run);
+    }
+    bandShifts((glitch*3)|0, glitch, 120, 20);
+  } else if(st==='mosaic'){
+    sctx.imageSmoothingEnabled = false;
+    for(let i=0, n=(glitch*9)|0; i<n; i++){
+      const bw = (40+Math.random()*200)*DPR, bh = (30+Math.random()*140)*DPR;
+      const x = Math.random()*(W-bw), y = Math.random()*(H-bh);
+      const mw = Math.max(2, bw/10), mh = Math.max(2, bh/10);
+      sctx.drawImage(scene, x+bw/2-mw/2, y+bh/2-mh/2, mw, mh, x, y, bw, bh);
+    }
+    sctx.imageSmoothingEnabled = true;
+    for(let i=0, n=(glitch*6)|0; i<n; i++){
+      const bw = (30+Math.random()*170)*DPR, bh = (14+Math.random()*80)*DPR;
+      const sx = Math.random()*(W-bw), sy = Math.random()*(H-bh);
+      sctx.drawImage(scene, sx,sy,bw,bh, sx+(Math.random()-0.5)*160*DPR, sy+(Math.random()-0.5)*60*DPR, bw,bh);
+    }
+  } else if(st==='wave'){
+    const s = (0.2 + glitch*1.5)*DPR;
+    sctx.save(); sctx.globalAlpha=0.95;
+    sctx.drawImage(scene, -s, 0, W+2*s, H);
+    sctx.restore();
+    pullsH((glitch*5)|0, glitch);
+  }
+  while(tears>0){
+    tears--;
+    const bh = (60+Math.random()*200)*DPR;
+    const by = Math.random()*(H-bh);
+    const ox = (Math.random()-0.5)*480*DPR;
+    sctx.drawImage(scene, 0,by,W,bh, ox,by,W,bh);
+  }
+}
+function pullsH(n, glitch){
+  for(let i=0;i<n;i++){
+    const bh = (2+Math.random()*26)*DPR;
+    const by = Math.random()*(H-bh);
+    const sw = Math.max(2, (1+Math.random()*6)*DPR);
+    const sx = Math.random()*(W-sw);
+    const run = (60+Math.random()*640)*DPR*(0.35+Math.min(1,glitch));
+    const dx  = Math.random()<0.5 ? sx-run : sx;
+    sctx.drawImage(scene, sx,by,sw,bh, dx,by,run,bh);
+  }
+}
+function bandShifts(n, glitch, oxMax, oyMax){
+  for(let i=0;i<n;i++){
+    const bh = (3+Math.random()*46)*DPR;
+    const by = Math.random()*(H-bh);
+    const ox = (Math.random()-0.5)*glitch*oxMax*DPR;
+    const oy = Math.random()<0.25 ? (Math.random()-0.5)*oyMax*DPR : 0;
+    sctx.drawImage(scene, 0,by,W,bh, ox,by+oy,W,bh);
+  }
+}
+
+function updateScene(t, dt, glitch){
+  styleScene(t, dt, glitch);
+  sctx.fillStyle = BG_RGBA(0.018 + (1-smooth)*0.030);
+  sctx.fillRect(0,0,W,H);
+  if(Math.random() < smooth*0.45 + glitchE*0.18 + 0.012) spawnStreaks(1, smooth);
+  drawPoem(t, glitch);
+}
+
+/* ===================== compose ===================== */
+function render(t, glitch){
+  const shake = glitchE>0.3 ? (Math.random()-0.5)*glitchE*22*DPR : 0;
+  vctx.fillStyle = BG_STR; vctx.fillRect(0,0,W,H);
+  if(invertN>0){ vctx.filter='invert(1)'; invertN--; }
+  if(T.style==='wave'){
+    const bh = Math.max(8, 14*DPR);
+    const amp = (4 + glitch*46)*DPR*(0.3+smooth);
+    for(let y=0; y<H; y+=bh){
+      const dx = Math.sin(y*0.012/DPR + t*0.004)*amp;
+      vctx.drawImage(scene, 0,y,W,bh, shake+dx,y,W,bh);
+    }
+  } else {
+    vctx.drawImage(scene, shake, 0);
+  }
+  vctx.filter='none';
+  if(T.style==='crt'){
+    vctx.save();
+    vctx.globalCompositeOperation='lighter';
+    vctx.globalAlpha = 0.14 + glitch*0.12;
+    const g2 = (2+glitch*14)*DPR;
+    vctx.drawImage(scene,  g2, 0);
+    vctx.drawImage(scene, -g2, 0);
+    vctx.restore();
+    vctx.save();
+    vctx.globalAlpha = 0.5;
+    vctx.fillStyle = scanPattern;
+    vctx.fillRect(0,0,W,H);
+    vctx.restore();
+  }
+  if(Math.random() < glitch*0.6){
+    const bh = (6+Math.random()*30)*DPR, by = Math.random()*(H-bh);
+    vctx.globalAlpha = 0.5;
+    vctx.drawImage(scene, 0,by,W,bh, shake, by+(Math.random()-0.5)*46*DPR, W,bh);
+    vctx.globalAlpha = 1;
+  }
+  vctx.save();
+  vctx.globalAlpha = 0.22 + treble*0.30 + glitchE*0.06;
+  vctx.translate(-(ditherOx%240), -(ditherOy%240));
+  vctx.fillStyle = ditherPats[ditherIx];
+  vctx.fillRect(0,0,W+480,H+480);
+  vctx.restore();
+  if(Math.random() < (T.style==='crt'?0.35:0.10) + treble*0.45 + glitchE*0.2){
+    const n = 1+((Math.random()*3)|0);
+    for(let i=0;i<n;i++){
+      vctx.fillStyle = Math.random()<0.5 ? 'rgba(255,255,255,0.7)' : (pick(PALETTE)+'b0');
+      vctx.fillRect(0, Math.random()*H, W, Math.max(1, Math.round(DPR*(Math.random()<0.85?1:2))));
+    }
+  }
+  if(flash>0.02){
+    vctx.globalAlpha = flash*0.16;
+    vctx.fillStyle = flashColor;
+    vctx.fillRect(0,0,W,H);
+    vctx.globalAlpha = 1;
+  }
+}
+
+/* ===================== main loop ===================== */
+let last=0, hudUntil=0, hudManual=false;
+let ftAcc=0, ftN=0;
+
+function frame(t){
+  const dt = Math.min(0.05, Math.max(0.001, (t-last)/1000)); last=t;
+  readAudio(t, dt);
+  updatePoem(t, dt);
+  const glitch = Math.min(1.9, 0.05 + smooth*0.9 + glitchE*1.15);
+  updateScene(t, dt, glitch);
+  render(t, glitch);
+  lvBar.style.width = Math.round(level*100)+'%';
+  const live = wikiOk && (performance.now()-lastEvent < 60000);
+  wikiLabel.textContent = live
+    ? `WIKI ● 5音:${five.length+fiveYa.length} 7音:${seven.length}`
+    : 'WIKI × 内蔵語彙';
+  if(!hudManual && hudUntil && t>hudUntil){ hud.classList.add('faded'); hudUntil=0; }
+  ftAcc += dt; ftN++;
+  if(ftN>=90){
+    if(ftAcc/ftN > 0.024 && dprCap>1){ dprCap -= 0.5; resize(); }
+    ftAcc=0; ftN=0;
+  }
+  requestAnimationFrame(frame);
+}
+
+/* ===================== start / controls ===================== */
+async function start(){
+  if(started || starting) return;
+  starting = true;
+  if(!demo){
+    startMain.textContent = 'ALLOW MICROPHONE…';
+    try{ await initMic(); }
+    catch(e){ demo = true; }
+  }
+  srcLabel.textContent = demo ? 'NO MIC → DEMO MODE' : 'MIC LIVE';
+  startEl.classList.add('hidden');
+  hud.classList.remove('hidden');
+  started = true; starting = false;
+  hudUntil = performance.now() + 9000;
+  last = performance.now();
+  phase='gap'; phaseAt = performance.now() + 1500;
+  spawnStreaks(2, 0.3);
+  requestAnimationFrame(frame);
+}
+startEl.addEventListener('click', start);
+if(demo) start();
+
+function toggleFS(){
+  const el = document.documentElement;
+  if(document.fullscreenElement || document.webkitFullscreenElement){
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  } else {
+    (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+  }
+}
+function applyTheme(ix){
+  themeIx = ((ix % THEMES.length) + THEMES.length) % THEMES.length;
+  T = THEMES[themeIx];
+  PALETTE = T.palette;
+  BG_STR = `rgb(${T.bg[0]},${T.bg[1]},${T.bg[2]})`;
+  document.body.style.background = BG_STR;
+  dithers = [makeDither(), makeDither()];
+  ditherPats = dithers.map(c => vctx.createPattern(c,'repeat'));
+  sctx.fillStyle = BG_STR; sctx.fillRect(0,0,W,H);
+  spawnStreaks(4, 0.7);
+  glitchE = Math.min(2.0, glitchE + 0.9);
+  tears += 2; flash = 0.9; flashColor = pick(PALETTE);
+  hudTheme();
+  if(!hudManual){ hud.classList.remove('faded'); hudUntil = performance.now()+2600; }
+}
+function hudTheme(){
+  themeLabel.textContent = `${T.name} / ${T.style.toUpperCase()}` + (tempo!==1 ? ` · TEMPO ×${parseFloat(tempo.toFixed(2))}` : '');
+}
+function setGain(g){
+  gain = Math.min(2.5, Math.max(0.3, Math.round(g*10)/10));
+  localStorage.setItem('micGlitchGain', gain);
+  srcLabel.textContent = (demo ? 'NO MIC → DEMO MODE' : 'MIC LIVE') + ' ×' + gain.toFixed(1);
+  if(!hudManual){ hud.classList.remove('faded'); hudUntil = performance.now()+2200; }
+}
+function setTempo(v){
+  tempo = Math.min(3, Math.max(0.25, Math.round(v*100)/100));
+  localStorage.setItem('micGlitchTempo', tempo);
+  hudTheme();
+  if(!hudManual){ hud.classList.remove('faded'); hudUntil = performance.now()+2200; }
+}
+
+view.addEventListener('click', ()=>{ if(started) toggleFS(); });
+addEventListener('keydown', e=>{
+  if(e.key==='f' || e.key==='F') toggleFS();
+  if(e.key==='h' || e.key==='H'){ hudManual=true; hud.classList.toggle('faded'); }
+  if(e.key==='Enter' && started) applyTheme(themeIx+1);
+  if(e.key==='ArrowUp')    setGain(gain+0.1);
+  if(e.key==='ArrowDown')  setGain(gain-0.1);
+  if(e.key==='ArrowRight') setTempo(tempo*1.25);
+  if(e.key==='ArrowLeft')  setTempo(tempo/1.25);
+});
+</script>
+</body>
+</html>
