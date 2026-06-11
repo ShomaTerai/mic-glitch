@@ -31,7 +31,7 @@
 <canvas id="view"></canvas>
 <div id="hud" class="hidden">
   <div><span id="srcLabel">MIC</span><span class="bar"><i id="lvBar"></i></span><span id="wikiLabel">WIKI …</span></div>
-  <div><span id="themeLabel">PAPER / SMEAR</span>&nbsp;&nbsp;↑↓: MIC&nbsp;&nbsp;ENTER: NEXT&nbsp;&nbsp;F: FULLSCREEN&nbsp;&nbsp;H: HIDE</div>
+  <div><span id="themeLabel">PAPER / SMEAR</span>&nbsp;&nbsp;↑↓: MIC&nbsp;&nbsp;←→: TEMPO&nbsp;&nbsp;ENTER: NEXT&nbsp;&nbsp;F: FULLSCREEN&nbsp;&nbsp;H: HIDE</div>
 </div>
 <div id="start">
   <div id="startMain">CLICK TO CONNECT</div>
@@ -119,6 +119,7 @@ let audioCtx=null, analyser=null, tdata=null, fdata=null;
 let level=0, smooth=0, bass=0, treble=0, peakRef=0.03;
 let glitchE=0, flash=0, flashColor='#fff', lastKick=-9999, tears=0, invertN=0;
 let gain = parseFloat(localStorage.getItem('micGlitchGain')||'1') || 1;
+let tempo = parseFloat(localStorage.getItem('micGlitchTempo')||'1') || 1;   // 切り替わり速度（←→キー）
 let demoPhase=0, demoSpike=0, demoNextSpike=0;
 
 const avg = (a,i0,i1)=>{ let s=0,n=0; for(let i=Math.max(0,i0); i<Math.min(i1,a.length); i++){ s+=a[i]; n++; } return n? s/n : 0; };
@@ -228,8 +229,8 @@ function nextTitle(t){
     title = fakeWord(); titleLang = '';
   }
   titleA = 1; titleSetAt = t;
-  const r = Math.random();   // 緩急: 連打 / ふつう / ためる
-  nextTitleAt = t + (r<0.30 ? 350+Math.random()*350 : r<0.85 ? 900+Math.random()*1400 : 2600+Math.random()*2200);
+  const r = Math.random();   // 緩急: 連打 / ふつう / ためる（tempoで全体を伸縮）
+  nextTitleAt = t + (r<0.30 ? 350+Math.random()*350 : r<0.85 ? 900+Math.random()*1400 : 2600+Math.random()*2200)/tempo;
 }
 function updateTitle(t, dt){
   if(t>=nextTitleAt) nextTitle(t);
@@ -547,8 +548,17 @@ function applyTheme(ix){
   spawnStreaks(4, 0.7);
   glitchE = Math.min(2.0, glitchE + 0.9);
   tears += 2; flash = 0.9; flashColor = pick(PALETTE);
-  themeLabel.textContent = `${T.name} / ${T.style.toUpperCase()}`;
+  hudTheme();
   if(!hudManual){ hud.classList.remove('faded'); hudUntil = performance.now()+2600; }
+}
+function hudTheme(){
+  themeLabel.textContent = `${T.name} / ${T.style.toUpperCase()}` + (tempo!==1 ? ` · TEMPO ×${parseFloat(tempo.toFixed(2))}` : '');
+}
+function setTempo(v){
+  tempo = Math.min(3, Math.max(0.25, Math.round(v*100)/100));
+  localStorage.setItem('micGlitchTempo', tempo);
+  hudTheme();
+  if(!hudManual){ hud.classList.remove('faded'); hudUntil = performance.now()+2200; }
 }
 
 function setGain(g){
@@ -563,8 +573,10 @@ addEventListener('keydown', e=>{
   if(e.key==='f' || e.key==='F') toggleFS();
   if(e.key==='h' || e.key==='H'){ hudManual=true; hud.classList.toggle('faded'); }
   if(e.key==='Enter' && started) applyTheme(themeIx+1);
-  if(e.key==='ArrowUp')   setGain(gain+0.1);
-  if(e.key==='ArrowDown') setGain(gain-0.1);
+  if(e.key==='ArrowUp')    setGain(gain+0.1);
+  if(e.key==='ArrowDown')  setGain(gain-0.1);
+  if(e.key==='ArrowRight') setTempo(tempo*1.25);
+  if(e.key==='ArrowLeft')  setTempo(tempo/1.25);
 });
 </script>
 </body>
