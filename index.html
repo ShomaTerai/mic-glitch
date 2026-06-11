@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>ghost letters — mic glitch</title>
+<style>
+  html, body { margin:0; height:100%; background:#f4f3ef; overflow:hidden; }
+  #view { display:block; width:100vw; height:100vh; cursor:none; }
+  #start{
+    position:fixed; inset:0; z-index:10; display:flex; flex-direction:column; gap:18px;
+    align-items:center; justify-content:center; text-align:center;
+    background:#f4f3ef; cursor:pointer; user-select:none;
+    color:#5a5a60; font:500 13px/1.8 "SF Mono", Menlo, monospace;
+    letter-spacing:.55em; text-indent:.55em;
+  }
+  #start .sub{ color:#a7a7ab; font-size:10px; letter-spacing:.26em; text-indent:.26em; }
+  .hidden{ display:none !important; }
+  #hud{
+    position:fixed; left:16px; bottom:14px; z-index:5; pointer-events:none;
+    color:#8a8a90; font:500 10px/1.8 "SF Mono", Menlo, monospace; letter-spacing:.18em;
+    opacity:1; transition:opacity 1.5s;
+  }
+  #hud.faded{ opacity:0; }
+  #hud .bar{ display:inline-block; width:96px; height:3px; background:#dddbd4; margin-left:10px; vertical-align:middle; }
+  #hud .bar i{ display:block; height:100%; width:0%; background:#76767c; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud" class="hidden">
+  <div><span id="srcLabel">MIC</span><span class="bar"><i id="lvBar"></i></span></div>
+  <div>↑↓: MIC&nbsp;&nbsp;ENTER: COLOR&nbsp;&nbsp;F: FULLSCREEN&nbsp;&nbsp;H: HIDE</div>
+</div>
+<div id="start">
+  <div id="startMain">CLICK TO CONNECT</div>
+  <div class="sub">MIC → GLITCH ／ 音はこのMac内で処理のみ・録音や送信はしません</div>
+</div>
+<script>
+'use strict';
+/* ===================== canvas setup ===================== */
+const view  = document.getElementById('view');
+const vctx  = view.getContext('2d');
+const scene = document.createElement('canvas');   // 絵の具レイヤー（蓄積・スメア対象）
+const sctx  = scene.getContext('2d');
+const startEl   = document.getElementById('start');
+const startMain = document.getElementById('startMain');
+const hud      = document.getElementById('hud');
+const srcLabel = document.getElementById('srcLabel');
+const lvBar    = document.getElementById('lvBar');
+
+// ===== カラーパターン（Enterで切替） =====
+const THEMES = [
+  { name:'PAPER',  dark:false, bg:[244,243,239], palette:['#ff9ec9','#ff7fb1','#7fe3df','#8ee8c2','#ffe293','#ffc9a0','#b9b4f5','#9fd2f8','#f3a0e2','#ffd6e8'] },
+  { name:'NOIR',   dark:true,  bg:[10,10,16],    palette:['#ff2d8a','#19e3ff','#b4ff39','#9d4dff','#ff7a1a','#00ffb2','#ff3355','#4d7cff'] },
+  { name:'ROSE',   dark:false, bg:[248,233,236], palette:['#ff5f8f','#ff8fb5','#ffb347','#ff6b6b','#e84393','#c44569','#ffa8a8','#ffd3a5'] },
+  { name:'MOSS',   dark:false, bg:[234,242,232], palette:['#69b578','#4db6ac','#a8e6cf','#dcedc1','#39a0ca','#b2d8b2','#7fcf9b','#cde7a8'] },
+  { name:'COBALT', dark:true,  bg:[12,18,42],    palette:['#3da5ff','#6bf0ff','#7c5cff','#ff5fd0','#9fc5ff','#00e0c6','#4769ff','#b3e5ff'] },
+];
+let themeIx = 0, T = THEMES[0];
+let PALETTE = T.palette;
+let BG_STR  = `rgb(${T.bg[0]},${T.bg[1]},${T.bg[2]})`;
+const BG_RGBA = a => `rgba(${T.bg[0]},${T.bg[1]},${T.bg[2]},${a})`;
+const pick = arr => arr[(Math.random()*arr.length)|0];
+
+let W=0, H=0, DPR=1, dprCap=2;
+let dithers=[], ditherPats=[], ditherIx=0, ditherOx=0, ditherOy=0;
+
+function makeDither(){
+  // 参照画像1の「白地に小さなカラークロス」のディザ模様
+  const s = Math.round(240*DPR);
+  const c = document.createElement('canvas'); c.width=c.height=s;
+  const g = c.getContext('2d');
+  const cell = Math.max(4, Math.round(7*DPR));
+  const t = Math.max(1, Math.round(DPR));
+  const L = Math.max(3, Math.round(3.4*DPR));
+  for(let y=0; y<s; y+=cell){
+    for(let x=0; x<s; x+=cell){
+      const r = Math.random();
+      if(r<0.26){
+        g.globalAlpha = (r<0.10) ? 0.5 : 0.85;
+        g.fillStyle   = (r<0.10) ? '#9a9aa0' : pick(PALETTE);
+        g.fillRect(x+(cell-L)/2, y+(cell-t)/2, L, t);
+        g.fillRect(x+(cell-t)/2, y+(cell-L)/2, t, L);
+      }
+    }
+  }
+  return c;
+}
+
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, dprCap);
+  W = Math.max(2, Math.floor(innerWidth*DPR));
+  H = Math.max(2, Math.floor(innerHeight*DPR));
+  view.width=W; view.height=H;
+  view.style.width=innerWidth+'px'; view.style.height=innerHeight+'px';
+  scene.width=W; scene.height=H;
+  sctx.fillStyle=BG_STR; sctx.fillRect(0,0,W,H);
+  dithers = [makeDither(), makeDither()];
+  ditherPats = dithers.map(c => vctx.createPattern(c,'repeat'));
+}
+addEventListener('resize', resize);
+resize();
+
+/* ===================== audio ===================== */
+const qs = new URLSearchParams(location.search);
+let demo = qs.has('demo');           // ?demo=1 でマイクなし自動デモ
+let started=false, starting=false;
+let audioCtx=null, analyser=null, tdata=null, fdata=null;
+let level=0, smooth=0, bass=0, treble=0, peakRef=0.06;
+let glitchE=0, flash=0, flashColor='#fff', lastKick=-9999, tears=0, invertN=0;
+let gain = parseFloat(localStorage.getItem('micGlitchGain')||'1') || 1;
+let demoPhase=0, demoSpike=0, demoNextSpike=0;
+
+const avg = (a,i0,i1)=>{ let s=0,n=0; for(let i=Math.max(0,i0); i<Math.min(i1,a.length); i++){ s+=a[i]; n++; } return n? s/n : 0; };
+
+async function initMic(){
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+  });
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  await audioCtx.resume();
+  const src = audioCtx.createMediaStreamSource(stream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.55;
+  src.connect(analyser);
+  tdata = new Float32Array(analyser.fftSize);
+  fdata = new Uint8Array(analyser.frequencyBinCount);
+}
+
+function readAudio(t, dt){
+  if(demo){
+    demoPhase += dt;
+    const base = 0.20 + 0.13*Math.sin(demoPhase*0.55) + 0.09*Math.sin(demoPhase*1.9+1.2);
+    if(t >= demoNextSpike){
+      demoSpike = 0.5 + Math.random()*0.5;
+      demoNextSpike = t + 350 + Math.random()*2400;
+      kick(t, 0.6 + Math.random()*0.4);
+    }
+    demoSpike *= Math.exp(-dt*5);
+    level  = Math.max(0, Math.min(1, base + demoSpike));
+    bass   = Math.min(1, level*0.9);
+    treble = Math.min(1, level*0.55 + Math.random()*0.1);
+  } else {
+    analyser.getFloatTimeDomainData(tdata);
+    let s=0; for(let i=0;i<tdata.length;i++) s += tdata[i]*tdata[i];
+    const rms = Math.sqrt(s/tdata.length);
+    // 環境に合わせた自動感度：直近ピークを基準に正規化（↑↓キーで gain を微調整）
+    peakRef = Math.max(rms, peakRef*Math.exp(-dt*0.05), 0.03);
+    level = Math.min(1, Math.pow(rms/peakRef, 0.75) * gain);
+    analyser.getByteFrequencyData(fdata);
+    const hz = audioCtx.sampleRate/analyser.fftSize;
+    bass   = avg(fdata, 1, Math.round(200/hz))/255;
+    treble = avg(fdata, Math.round(2000/hz), Math.round(9000/hz))/255;
+    if(level - smooth > 0.26 && t - lastKick > 170) kick(t, level);
+  }
+  const k = level>smooth ? Math.min(1, dt*16) : Math.min(1, dt*3.2);
+  smooth += (level-smooth)*k;
+  glitchE *= Math.exp(-dt*2.4);
+  flash   *= Math.exp(-dt*5);
+}
+
+function kick(t, lv){      // 急な音（トランジェント）への反応
+  lastKick = t;
+  glitchE = Math.min(2.0, glitchE + 0.7 + lv*0.8);
+  tears  += 2 + ((Math.random()*3)|0);
+  flash   = Math.min(1, 0.7 + lv*0.5);
+  if(lv>0.55 && Math.random()<0.3) invertN = 1 + ((Math.random()*2)|0);   // 強い音で一瞬色反転
+  flashColor = pick(PALETTE);
+  ditherIx = (ditherIx+1)%dithers.length;
+  ditherOx = Math.random()*997; ditherOy = Math.random()*997;
+  spawnStreaks(2 + ((Math.random()*3)|0), lv);
+  if(Math.random()<0.65) forceGlyph(t);
+}
+
+/* ===================== letters ===================== */
+// 母音と子音を交互に出やすくして「発音できそうで意味のない並び」にする
+const VOW='AEIOU', CON='BCDFGHJKLMNPRSTVWXYZ';
+let glyph='', wasVowel = Math.random()<0.4;
+let glyphA=0, mode='idle', burstLeft=0, nextAt=600;
+
+function pickChar(){
+  const v = Math.random() < (wasVowel ? 0.22 : 0.58);
+  wasVowel = v;
+  const s = v ? VOW : CON;
+  return s[(Math.random()*s.length)|0];
+}
+function randChar(){ const s=VOW+CON; return s[(Math.random()*s.length)|0]; }
+
+// 稀に実在する単語を1字ずつ綴る（それ以外は無意味な並び）
+const WORDS = ['NOISE','SIGNAL','GHOST','ECHO','DREAM','VOID','SOUND','WAVE','STATIC','PULSE','DRIFT','LIGHT','MIST','BLOOM','HALO','FLUX','RAIN','WIND','DUST','GLOW','HUSH','ZERO','AURA','VEIL','EMBER','SHADE','TIDE','LISTEN'];
+let wordQueue = null;
+
+function startBurst(n, wordP){
+  mode = 'burst';
+  if(Math.random() < wordP){
+    wordQueue = WORDS[(Math.random()*WORDS.length)|0].split('');
+    burstLeft = wordQueue.length;
+  } else {
+    wordQueue = null;
+    burstLeft = n;
+  }
+}
+function step(t){
+  if(burstLeft>0){
+    if(wordQueue){
+      glyph = wordQueue.shift();
+      if(!wordQueue.length) wordQueue = null;
+      glyphA = 1; burstLeft--;
+      nextAt = t + 150 + Math.random()*160;   // 単語は読み取れるテンポで
+    } else {
+      if(!(Math.random()<0.10 && glyph)) glyph = pickChar();   // たまに同じ字を重ねる
+      glyphA = 1; burstLeft--;
+      nextAt = t + (Math.random()<0.16 ? 300+Math.random()*330 : 70+Math.random()*190);
+    }
+  } else {
+    mode='idle'; wordQueue=null;
+    nextAt = t + (Math.random()<0.25 ? 420+Math.random()*350 : 1200+Math.random()*3500);
+  }
+}
+function forceGlyph(t){
+  if(mode==='burst' && wordQueue) return;   // 綴り中の単語は自分のテンポを守る
+  if(mode==='idle') startBurst(1+((Math.random()*3)|0), 0.08);
+  step(t);
+}
+function updateGlyph(t, dt){
+  if(t>=nextAt){
+    if(mode==='idle') startBurst(2+((Math.random()*6)|0), 0.16);
+    step(t);
+  }
+  glyphA *= Math.exp(-dt*(mode==='burst' ? 0.8 : 1.6));
+}
+
+const FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif';
+function drawGlyph(t, glitch){
+  if(glyphA<0.03 || !glyph) return;
+  const ch   = (Math.random()<glitch*0.16) ? randChar() : glyph;   // 一瞬だけ別の字に化ける
+  const size = H*0.50*(1+(Math.random()-0.5)*glitch*0.12);
+  // multiplyで毎フレーム累積するため1回分はごく薄く（白フェードとの均衡で淡いインクに落ち着く）
+  const a    = Math.min(0.075, glyphA*(0.020 + smooth*0.050 + glitchE*0.012));
+  const jx = (Math.random()-0.5)*glitch*46*DPR;
+  const jy = (Math.random()-0.5)*glitch*26*DPR;
+  const off  = (1.5 + glitch*34)*DPR;
+  const blur = (2 + (1-smooth)*10 + glitch*2)*DPR;
+  const cx = W/2+jx, cy = H/2+jy + H*0.01;
+  sctx.save();
+  sctx.font = `800 ${size}px ${FONT}`;
+  sctx.textAlign='center'; sctx.textBaseline='middle';
+  // 明るい背景=multiply(インク)、暗い背景=lighter(発光)
+  sctx.globalCompositeOperation = T.dark ? 'lighter' : 'multiply';
+  sctx.filter = `blur(${blur}px)`;
+  if(T.dark){
+    sctx.fillStyle = `rgba(255,45,138,${a*0.7})`; sctx.fillText(ch, cx-off, cy+off*0.3);
+    sctx.fillStyle = `rgba(25,227,255,${a*0.7})`; sctx.fillText(ch, cx+off, cy-off*0.2);
+    sctx.filter = `blur(${blur*0.55}px)`;
+    sctx.fillStyle = `rgba(240,244,255,${a})`;    sctx.fillText(ch, cx, cy);
+  } else {
+    sctx.fillStyle = `rgba(255,70,160,${a*0.6})`; sctx.fillText(ch, cx-off, cy+off*0.3);
+    sctx.fillStyle = `rgba(0,190,200,${a*0.6})`;  sctx.fillText(ch, cx+off, cy-off*0.2);
+    sctx.filter = `blur(${blur*0.55}px)`;
+    sctx.fillStyle = `rgba(52,52,68,${a})`;       sctx.fillText(ch, cx, cy);
+  }
+  sctx.restore();
+}
+
+/* ===================== paint layer ===================== */
+function spawnStreaks(n, strength){
+  for(let i=0;i<n;i++){
+    const fullRow = Math.random()<0.35;   // 画面幅いっぱいの帯（参照画像2の横ストライプ）
+    const w = fullRow ? W*(0.5+Math.random()*0.7) : (90 + Math.random()*420)*(0.6+strength)*DPR;
+    const h = fullRow ? (10+Math.random()*70)*DPR : (14 + Math.random()*130)*DPR;
+    const x = Math.random()*W, y = Math.random()*H;
+    const r = Math.max(w,h)/2;
+    const g = sctx.createRadialGradient(x,y,0, x,y,r);
+    const col = pick(PALETTE);
+    g.addColorStop(0, col);
+    g.addColorStop(1, col+'00');
+    sctx.save();
+    sctx.translate(x,y); sctx.scale(w/Math.max(w,h), h/Math.max(w,h)); sctx.translate(-x,-y);
+    sctx.globalAlpha = 0.30 + Math.random()*0.38 + strength*0.15;
+    sctx.globalCompositeOperation = T.dark ? 'lighter' : 'source-over';
+    sctx.fillStyle = g;
+    sctx.beginPath(); sctx.arc(x,y,r,0,7); sctx.fill();
+    sctx.restore();
+  }
+}
+
+function updateScene(t, dt, glitch){
+  // 横方向に少しずつ引き伸ばす（ピクセルスメアの核）
+  const s = (0.4 + glitch*4.2)*DPR;
+  sctx.save();
+  sctx.globalAlpha = 0.93;
+  sctx.drawImage(scene, -s, 0, W+2*s, H);
+  sctx.restore();
+  // 白へ戻るフェード（静かなほど速く白紙に還る）
+  sctx.fillStyle = BG_RGBA(0.018 + (1-smooth)*0.030);
+  sctx.fillRect(0,0,W,H);
+  // 音があるあいだは色が湧く（無音でもごく稀に）
+  if(Math.random() < smooth*0.45 + glitchE*0.18 + 0.012) spawnStreaks(1, smooth);
+  // ピクセル引き抜き（細いスライスを横に長く伸ばす）
+  const pulls = (glitch*13)|0;
+  for(let i=0;i<pulls;i++){
+    const bh = (2+Math.random()*26)*DPR;
+    const by = Math.random()*(H-bh);
+    const sw = Math.max(2, (1+Math.random()*6)*DPR);
+    const sx = Math.random()*(W-sw);
+    const run = (60+Math.random()*640)*DPR*(0.35+Math.min(1,glitch));
+    const dx  = Math.random()<0.5 ? sx-run : sx;
+    sctx.drawImage(scene, sx,by,sw,bh, dx,by,run,bh);
+  }
+  // 帯ズレ
+  const bands = (glitch*10)|0;
+  for(let i=0;i<bands;i++){
+    const bh = (3+Math.random()*46)*DPR;
+    const by = Math.random()*(H-bh);
+    const ox = (Math.random()-0.5)*glitch*240*DPR;
+    const oy = Math.random()<0.25 ? (Math.random()-0.5)*36*DPR : 0;   // たまに縦ズレも
+    sctx.drawImage(scene, 0,by,W,bh, ox,by+oy,W,bh);
+  }
+  // 大きな引き裂き（キック時）
+  while(tears>0){
+    tears--;
+    const bh = (60+Math.random()*200)*DPR;
+    const by = Math.random()*(H-bh);
+    const ox = (Math.random()-0.5)*480*DPR;
+    sctx.drawImage(scene, 0,by,W,bh, ox,by,W,bh);
+  }
+  drawGlyph(t, glitch);
+}
+
+/* ===================== compose ===================== */
+function render(t, glitch){
+  const shake = glitchE>0.3 ? (Math.random()-0.5)*glitchE*22*DPR : 0;
+  vctx.fillStyle = BG_STR; vctx.fillRect(0,0,W,H);
+  if(invertN>0){ vctx.filter='invert(1)'; invertN--; }
+  vctx.drawImage(scene, shake, 0);
+  vctx.filter='none';
+  // 行エコー
+  if(Math.random() < glitch*0.6){
+    const bh = (6+Math.random()*30)*DPR, by = Math.random()*(H-bh);
+    vctx.globalAlpha = 0.5;
+    vctx.drawImage(scene, 0,by,W,bh, shake, by+(Math.random()-0.5)*46*DPR, W,bh);
+    vctx.globalAlpha = 1;
+  }
+  // ディザ模様（カラークロス）
+  vctx.save();
+  vctx.globalAlpha = 0.22 + treble*0.30 + glitchE*0.06;
+  vctx.translate(-(ditherOx%240), -(ditherOy%240));
+  vctx.fillStyle = ditherPats[ditherIx];
+  vctx.fillRect(0,0,W+480,H+480);
+  vctx.restore();
+  // 走査ノイズ線
+  if(Math.random() < 0.10 + treble*0.45 + glitchE*0.2){
+    const n = 1+((Math.random()*3)|0);
+    for(let i=0;i<n;i++){
+      vctx.fillStyle = Math.random()<0.5 ? 'rgba(255,255,255,0.7)' : (pick(PALETTE)+'b0');
+      vctx.fillRect(0, Math.random()*H, W, Math.max(1, Math.round(DPR*(Math.random()<0.85?1:2))));
+    }
+  }
+  // キック時の色フラッシュ
+  if(flash>0.02){
+    vctx.globalAlpha = flash*0.16;
+    vctx.fillStyle = flashColor;
+    vctx.fillRect(0,0,W,H);
+    vctx.globalAlpha = 1;
+  }
+}
+
+/* ===================== main loop ===================== */
+let last=0, hudUntil=0, hudManual=false;
+let ftAcc=0, ftN=0;
+
+function frame(t){
+  const dt = Math.min(0.05, Math.max(0.001, (t-last)/1000)); last=t;
+  readAudio(t, dt);
+  updateGlyph(t, dt);
+  const glitch = Math.min(1.9, 0.05 + smooth*0.9 + glitchE*1.15);
+  updateScene(t, dt, glitch);
+  render(t, glitch);
+  lvBar.style.width = Math.round(level*100)+'%';
+  if(!hudManual && hudUntil && t>hudUntil){ hud.classList.add('faded'); hudUntil=0; }
+  // 重い環境では解像度を自動で一段下げる
+  ftAcc += dt; ftN++;
+  if(ftN>=90){
+    if(ftAcc/ftN > 0.024 && dprCap>1){ dprCap -= 0.5; resize(); }
+    ftAcc=0; ftN=0;
+  }
+  requestAnimationFrame(frame);
+}
+
+/* ===================== start / controls ===================== */
+async function start(){
+  if(started || starting) return;
+  starting = true;
+  if(!demo){
+    startMain.textContent = 'ALLOW MICROPHONE…';
+    try{ await initMic(); }
+    catch(e){ demo = true; }
+  }
+  srcLabel.textContent = demo ? 'NO MIC → DEMO MODE' : 'MIC LIVE';
+  startEl.classList.add('hidden');
+  hud.classList.remove('hidden');
+  started = true; starting = false;
+  hudUntil = performance.now() + 9000;
+  last = performance.now();
+  nextAt = performance.now() + 500;
+  spawnStreaks(2, 0.3);
+  requestAnimationFrame(frame);
+}
+startEl.addEventListener('click', start);
+if(demo) start();   // デモは音声不要なのでクリックなしで開始
+
+function toggleFS(){
+  const el = document.documentElement;
+  if(document.fullscreenElement || document.webkitFullscreenElement){
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  } else {
+    (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+  }
+}
+function applyTheme(ix){
+  themeIx = ((ix % THEMES.length) + THEMES.length) % THEMES.length;
+  T = THEMES[themeIx];
+  PALETTE = T.palette;
+  BG_STR = `rgb(${T.bg[0]},${T.bg[1]},${T.bg[2]})`;
+  document.body.style.background = BG_STR;
+  dithers = [makeDither(), makeDither()];
+  ditherPats = dithers.map(c => vctx.createPattern(c,'repeat'));
+  sctx.fillStyle = BG_STR; sctx.fillRect(0,0,W,H);   // ハードカットで切替
+  spawnStreaks(4, 0.7);
+  glitchE = Math.min(2.0, glitchE + 0.9);
+  tears += 2; flash = 0.9; flashColor = pick(PALETTE);
+}
+
+function setGain(g){
+  gain = Math.min(2.5, Math.max(0.3, Math.round(g*10)/10));
+  localStorage.setItem('micGlitchGain', gain);
+  srcLabel.textContent = (demo ? 'NO MIC → DEMO MODE' : 'MIC LIVE') + ' ×' + gain.toFixed(1);
+  if(!hudManual){ hud.classList.remove('faded'); hudUntil = performance.now()+2200; }
+}
+
+view.addEventListener('click', ()=>{ if(started) toggleFS(); });
+addEventListener('keydown', e=>{
+  if(e.key==='f' || e.key==='F') toggleFS();
+  if(e.key==='h' || e.key==='H'){ hudManual=true; hud.classList.toggle('faded'); }
+  if(e.key==='Enter' && started) applyTheme(themeIx+1);
+  if(e.key==='ArrowUp')   setGain(gain+0.1);
+  if(e.key==='ArrowDown') setGain(gain-0.1);
+});
+</script>
+</body>
+</html>
