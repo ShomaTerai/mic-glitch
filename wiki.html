@@ -276,13 +276,6 @@ function drawTitle(t, glitch){
     sctx.filter = `blur(${blur*0.55}px)`;
     sctx.fillStyle = `rgba(52,52,68,${a})`;       sctx.fillText(str, cx, cy);
   }
-  // 出典の言語版を小さく
-  if(titleLang){
-    sctx.filter = 'none';
-    sctx.font = `500 ${Math.max(10*DPR, H*0.016)}px "SF Mono", Menlo, monospace`;
-    sctx.fillStyle = T.dark ? `rgba(200,210,230,${a*0.9})` : `rgba(90,90,100,${a*0.9})`;
-    sctx.fillText(titleLang, cx, cy + size*0.72);
-  }
   sctx.restore();
 }
 
