@@ -178,16 +178,16 @@ function kick(t, lv){
   ditherIx = (ditherIx+1)%dithers.length;
   ditherOx = Math.random()*997; ditherOy = Math.random()*997;
   spawnStreaks(2 + ((Math.random()*3)|0), lv);
-  // 強い音は句の進行にも介入する
-  if(phase==='hold' && Math.random()<0.3){ phase='dissolve'; phaseAt = t + 600; }
-  else if(phase==='gap' && Math.random()<0.4) phaseAt = Math.min(phaseAt, t + 120);
+  // 強い音は次の句の始まりを早める（句の途中の5-7-5のリズムは守る）
+  if(phase==='gap' && Math.random()<0.4) phaseAt = Math.min(phaseAt, t + 120);
 }
 
 /* ===================== 言葉のパイプライン（日本語Wikipediaのみ） ===================== */
 let es=null, wikiOk=false, lastEvent=0;
 let five=[], fiveYa=[], seven=[];          // 5音 / 4音+「や」 / 7音
 const seenTitles = new Set();
-let lookupQueue = [];
+let rawPool = [];        // 読み未解決の漢字タイトル（末尾が最新）
+let resolving = false;
 
 const SMALL_KANA = 'ゃゅょぁぃぅぇぉゎャュョァィゥェォヮ';
 function countMora(kana){
@@ -210,46 +210,67 @@ function bucketize(title, kana){
 }
 function push5(arr, e){
   arr.push(e);
-  if(arr.length>60) arr.shift();
+  if(arr.length>150) arr.shift();
 }
 function intake(titleRaw){
   const title = (titleRaw||'').trim();
   if(!title || title.includes(':') || title.length<2 || title.length>20) return;
   if(seenTitles.has(title)) return;
-  if(seenTitles.size>1500) seenTitles.clear();
+  if(seenTitles.size>4000) seenTitles.clear();
   seenTitles.add(title);
   const kana = pureKana(title);
   if(kana){ bucketize(title, kana); return; }
-  if(/[一-鿏々]/.test(title)){          // 漢字入り → 読みを記事冒頭から取りに行く
-    lookupQueue.push(title);
-    if(lookupQueue.length>40) lookupQueue.shift();
+  if(/[一-鿏々]/.test(title)){          // 漢字入り → 控えに積む（読みは必要になったら引く）
+    rawPool.push(title);
+    if(rawPool.length>3000) rawPool.shift();
   }
 }
+function stockLow(){ return five.length<12 || seven.length<12 || fiveYa.length<8; }
 // 読み解決: 記事冒頭の「題名（よみがな）」括弧を拾う。取れなければ捨てる
+// 在庫が減った時だけ、新しい編集から順に引く（内蔵語彙なし運用）
 async function resolveOne(){
-  if(!lookupQueue.length) return;
-  const title = lookupQueue.pop();
+  if(resolving || !rawPool.length || !stockLow()) return;
+  resolving = true;
+  const title = rawPool.pop();
   try{
     const r = await fetch('https://ja.wikipedia.org/api/rest_v1/page/summary/'+encodeURIComponent(title));
-    if(!r.ok) return;
-    const j = await r.json();
-    const ex = (j.extract||'').slice(0,90);
-    // 読み括弧はタイトル直後（冒頭28字以内に開く括弧）のみ採用。本文後方の括弧は読みではない
-    const m = ex.match(/^[^（()]{1,28}[（(]\s*([ぁ-ゖァ-ヶー〜・\s　]+?)\s*[、,）)]/);
-    if(!m) return;
-    const kana = m[1].replace(/[・\s　]/g,'');
-    if(!/^[ぁ-ゖァ-ヶー〜]+$/.test(kana)) return;
-    bucketize(title, kana);
+    if(r.ok){
+      const j = await r.json();
+      const ex = (j.extract||'').slice(0,90);
+      // 読み括弧はタイトル直後（冒頭28字以内に開く括弧）のみ採用。本文後方の括弧は読みではない
+      const m = ex.match(/^[^（()]{1,28}[（(]\s*([ぁ-ゖァ-ヶー〜・\s　]+?)\s*[、,）)]/);
+      if(m){
+        const kana = m[1].replace(/[・\s　]/g,'');
+        if(/^[ぁ-ゖァ-ヶー〜]+$/.test(kana)) bucketize(title, kana);
+      }
+    }
+  }catch(e){}
+  resolving = false;
+}
+setInterval(resolveOne, 1200);
+
+// 起動時シード: 過去24時間ぶん（最大2500件）の編集を遡って控えに積む
+async function seed(){
+  try{
+    const collected = [];
+    let cont = '';
+    const cutoff = Date.now() - 24*3600*1000;
+    for(let page=0; page<5; page++){
+      const r = await fetch('https://ja.wikipedia.org/w/api.php?action=query&list=recentchanges&rcnamespace=0&rclimit=500&rcshow=%21bot&rctype=edit%7Cnew&rcprop=title%7Ctimestamp&format=json&origin=*' + cont);
+      const j = await r.json();
+      const rcs = j.query && j.query.recentchanges || [];
+      collected.push(...rcs);
+      wikiOk = true; lastEvent = performance.now();
+      const oldest = rcs.length ? Date.parse(rcs[rcs.length-1].timestamp) : 0;
+      if(!(j.continue && j.continue.rccontinue) || oldest < cutoff) break;
+      cont = '&rccontinue=' + encodeURIComponent(j.continue.rccontinue);
+    }
+    collected.reverse().forEach(rc=>intake(rc.title));   // 古→新の順に積み、末尾を最新に保つ
   }catch(e){}
 }
-setInterval(resolveOne, 1700);
 
 function initWiki(){
-  // 起動時シード: 直近の編集100件（bot除外・標準記事のみ）
-  fetch('https://ja.wikipedia.org/w/api.php?action=query&list=recentchanges&rcnamespace=0&rclimit=100&rcshow=!bot&rctype=edit%7Cnew&format=json&origin=*')
-    .then(r=>r.json())
-    .then(j=>{ (j.query && j.query.recentchanges || []).forEach(rc=>intake(rc.title)); wikiOk=true; lastEvent=performance.now(); })
-    .catch(()=>{});
+  seed();
   // ライブストリーム
   try{ es = new EventSource('https://stream.wikimedia.org/v2/stream/recentchange'); }
   catch(e){ return; }
@@ -265,16 +286,11 @@ function initWiki(){
 }
 initWiki();
 
-// 完全オフライン用の内蔵語彙（モーラ数は検証済み）
-const FB5 = ['観覧車','冷蔵庫','マンホール','すべりだい','扇風機','非常口','蜃気楼','衣替え','かたつむり','ランドセル','シャボン玉','路線バス','コンビニや','たんぽぽや'];
-const FB7 = ['非常階段','自由研究','五十音順','回送電車','折りたたみ傘','自転車置き場','観測気球','留守番電話'];
-
 /* ===================== 川柳の組み立てと進行 ===================== */
-let poem = null;              // { lines: [{text}, {text}, {text}] }
-let lineA = [0,0,0];
-let visibleLines = 0;
-let phase = 'gap', phaseAt = 1200;
-let usedFallback = new Set();
+// 5→7→5 を1句ずつ中央に出す。じっと見ているとリズムに気づく程度に
+let poem = null, lineIx = 0, lineAlpha = 0;
+let phase = 'gap', phaseAt = 1500;
+let wipe = 0;   // 行が変わる瞬間に前の句を数フレームで掃く
 
 function takeFrom(arr){
   if(!arr.length) return null;
@@ -282,87 +298,74 @@ function takeFrom(arr){
   const idx = arr.length - 1 - ((Math.random()*span)|0);
   return arr.splice(idx,1)[0];
 }
-function fb(list){
-  let w = pick(list);
-  if(usedFallback.has(w) && Math.random()<0.8) w = pick(list);
-  usedFallback.add(w); if(usedFallback.size>10) usedFallback.clear();
-  return { text:w };
-}
 function composePoem(){
-  const L1 = (Math.random()<0.30 ? takeFrom(fiveYa) : null) || takeFrom(five) || takeFrom(fiveYa) || fb(FB5);
-  const L2 = takeFrom(seven) || fb(FB7);
-  const L3 = takeFrom(five) || takeFrom(fiveYa) || fb(FB5);
-  poem = { lines:[L1, L2, L3] };
+  if(!(seven.length>=1 && five.length+fiveYa.length>=2)) return false;   // 在庫不足なら休む（偽物は出さない）
+  const L1 = (Math.random()<0.30 ? takeFrom(fiveYa) : null) || takeFrom(five) || takeFrom(fiveYa);
+  const L2 = takeFrom(seven);
+  const L3 = takeFrom(five) || takeFrom(fiveYa);
+  poem = { lines:[L1.text, L2.text, L3.text] };
+  return true;
 }
-function schedule(t, ms){ phaseAt = t + (ms*(0.8+Math.random()*0.5))/tempo; }
+function schedule(t, ms){ phaseAt = t + (ms*(0.85+Math.random()*0.4))/tempo; }
+function lineDur(ix){ return ix===1 ? 2300 : 1750; }   // 7音はすこし長く
 
 function updatePoem(t, dt){
   if(t >= phaseAt){
     if(phase==='gap'){
-      composePoem(); visibleLines=1; phase='reveal'; schedule(t, 1700);
-    } else if(phase==='reveal'){
-      if(visibleLines<3){ visibleLines++; schedule(t, 1700); }
-      else { phase='hold'; schedule(t, 7500); }
-    } else if(phase==='hold'){
-      phase='dissolve'; schedule(t, 2400);
-    } else {  // dissolve
-      phase='gap'; poem=null; visibleLines=0; schedule(t, 4200);
+      if(composePoem()){ lineIx=0; phase='line'; schedule(t, lineDur(0)); }
+      else schedule(t, 3000);                              // 在庫が育つのを待つ
+    } else if(phase==='line'){
+      wipe = 10;
+      if(lineIx===2){ phase='gap'; poem=null; schedule(t, 4800); }
+      else { phase='pause'; schedule(t, 430); }
+    } else {  // pause（句と句のあいだの一呼吸）
+      lineIx++; phase='line'; schedule(t, lineDur(lineIx));
     }
   }
-  for(let i=0;i<3;i++){
-    const on = poem && i<visibleLines && phase!=='dissolve';
-    lineA[i] += ((on?1:0)-lineA[i]) * Math.min(1, dt*(on?5:1.3));
-  }
+  const on = poem && phase==='line';
+  lineAlpha += ((on?1:0)-lineAlpha)*Math.min(1, dt*(on?6:2.4));
 }
 
-/* ===================== 縦書き描画 ===================== */
+/* ===================== 横書き描画（現在の一句のみ） ===================== */
 const FONT_M = '"Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif';
-const ROTATE_CH = 'ー〜―…';
 const GLITCH_KANA = '█▓▒ノシメ※彡';
 
 function drawPoem(t, glitch){
-  if(!poem) return;
-  const texts = poem.lines.map(l=>l.text);
-  const maxLen = Math.max(...texts.map(s=>[...s].length));
-  const cs   = Math.min(H*0.105, (H*0.70)/Math.max(5,maxLen));   // 1字の大きさ
-  const step = cs*1.12;
-  const colGap = cs*1.95;
-  // 静寂=句がくっきり立ち上がる / 音=にじんで崩れる（旧作とは逆）
-  const baseA = Math.min(phase==='hold' ? 0.14 : 0.10, (phase==='hold'?0.05:0.034) + smooth*0.04 + glitchE*0.012);
-  const blur  = (0.8 + smooth*4.0 + glitch*1.2)*DPR;
-  const off   = (0.8 + glitch*13)*DPR;
-
+  if(!poem || lineAlpha<0.02) return;
+  let str = poem.lines[lineIx];
+  if(glitch>0.3 && Math.random()<0.4){   // 数文字だけ崩れる
+    const arr=[...str];
+    const n = 1+((Math.random()*glitch*1.5)|0);
+    for(let i=0;i<n;i++) arr[(Math.random()*arr.length)|0] = GLITCH_KANA[(Math.random()*GLITCH_KANA.length)|0];
+    str = arr.join('');
+  }
   sctx.save();
+  let size = H*0.16;
+  sctx.font = `600 ${size}px ${FONT_M}`;
+  const w0 = sctx.measureText(str).width;
+  const maxW = W*0.82;
+  if(w0 > maxW) size *= maxW/w0;
+  // 静寂=句がくっきり立ち上がる / 音=にじんで崩れる
+  const a    = Math.min(0.13, 0.045 + smooth*0.04 + glitchE*0.012) * lineAlpha;
+  const blur = (0.8 + smooth*4.0 + glitch*1.2)*DPR;
+  const off  = (0.8 + glitch*13)*DPR;
+  const jx = (Math.random()-0.5)*glitch*30*DPR;
+  const jy = (Math.random()-0.5)*glitch*20*DPR;
+  const cx = W/2+jx, cy = H/2+jy;
+  sctx.font = `600 ${size}px ${FONT_M}`;
   sctx.textAlign='center'; sctx.textBaseline='middle';
   sctx.globalCompositeOperation = T.dark ? 'lighter' : 'multiply';
-
-  for(let li=0; li<3; li++){
-    if(lineA[li]<0.02) continue;
-    const chars = [...texts[li]];
-    const x = W/2 + (1-li)*colGap;                                   // 右=上の句
-    const y0 = H/2 - (chars.length-1)*step/2 + (li-1)*cs*0.55;       // 段違い
-    const a  = baseA*lineA[li];
-    const jx = (Math.random()-0.5)*glitch*26*DPR;
-    const jy = (Math.random()-0.5)*glitch*18*DPR;
-    const passes = T.dark
-      ? [[`rgba(255,45,138,${a*0.7})`,-off, off*0.3, blur],[`rgba(25,227,255,${a*0.7})`, off,-off*0.2, blur],[`rgba(240,244,255,${a})`,0,0,blur*0.55]]
-      : [[`rgba(255,70,160,${a*0.6})`,-off, off*0.3, blur],[`rgba(0,190,200,${a*0.6})`,  off,-off*0.2, blur],[`rgba(52,52,68,${a})`,  0,0,blur*0.55]];
-    sctx.font = `600 ${cs}px ${FONT_M}`;
-    for(const [col, ox, oy, bl] of passes){
-      sctx.filter = `blur(${bl}px)`;
-      sctx.fillStyle = col;
-      for(let k=0;k<chars.length;k++){
-        let ch = chars[k];
-        if(Math.random() < glitch*0.02) ch = GLITCH_KANA[(Math.random()*GLITCH_KANA.length)|0];
-        const cx = x+jx+ox, cy = y0+k*step+jy+oy;
-        if(ROTATE_CH.includes(ch)){           // 長音などは縦書き用に90度回す
-          sctx.save(); sctx.translate(cx,cy); sctx.rotate(Math.PI/2);
-          sctx.fillText(ch, 0, 0); sctx.restore();
-        } else {
-          sctx.fillText(ch, cx, cy);
-        }
-      }
-    }
+  sctx.filter = `blur(${blur}px)`;
+  if(T.dark){
+    sctx.fillStyle = `rgba(255,45,138,${a*0.7})`; sctx.fillText(str, cx-off, cy+off*0.3);
+    sctx.fillStyle = `rgba(25,227,255,${a*0.7})`; sctx.fillText(str, cx+off, cy-off*0.2);
+    sctx.filter = `blur(${blur*0.55}px)`;
+    sctx.fillStyle = `rgba(240,244,255,${a})`;    sctx.fillText(str, cx, cy);
+  } else {
+    sctx.fillStyle = `rgba(255,70,160,${a*0.6})`; sctx.fillText(str, cx-off, cy+off*0.3);
+    sctx.fillStyle = `rgba(0,190,200,${a*0.6})`;  sctx.fillText(str, cx+off, cy-off*0.2);
+    sctx.filter = `blur(${blur*0.55}px)`;
+    sctx.fillStyle = `rgba(52,52,68,${a})`;       sctx.fillText(str, cx, cy);
   }
   sctx.restore();
 }
@@ -486,6 +489,7 @@ function updateScene(t, dt, glitch){
   styleScene(t, dt, glitch);
   sctx.fillStyle = BG_RGBA(0.018 + (1-smooth)*0.030);
   sctx.fillRect(0,0,W,H);
+  if(wipe>0){ sctx.fillStyle = BG_RGBA(0.16); sctx.fillRect(0,0,W,H); wipe--; }
   if(Math.random() < smooth*0.45 + glitchE*0.18 + 0.012) spawnStreaks(1, smooth);
   drawPoem(t, glitch);
 }
@@ -559,10 +563,9 @@ function frame(t){
   updateScene(t, dt, glitch);
   render(t, glitch);
   lvBar.style.width = Math.round(level*100)+'%';
-  const live = wikiOk && (performance.now()-lastEvent < 60000);
-  wikiLabel.textContent = live
-    ? `WIKI ● 5音:${five.length+fiveYa.length} 7音:${seven.length}`
-    : 'WIKI × 内蔵語彙';
+  const live = wikiOk && (performance.now()-lastEvent < 120000);
+  wikiLabel.textContent = (live ? 'WIKI ● ' : 'WIKI × ')
+    + `5音:${five.length+fiveYa.length} 7音:${seven.length} 控え:${rawPool.length}`;
   if(!hudManual && hudUntil && t>hudUntil){ hud.classList.add('faded'); hudUntil=0; }
   ftAcc += dt; ftN++;
   if(ftN>=90){
